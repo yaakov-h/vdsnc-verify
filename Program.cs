@@ -1,5 +1,6 @@
 ﻿using System;
 using System.IO;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -38,11 +39,23 @@ static byte[] ComputeHash(string text)
     return sha.ComputeHash(data);
 }
 
-static bool ValidateHash(byte[] certificateData, byte[] hash, byte[] signature)
+static bool ValidateHash(X509Certificate2 certificate, byte[] hash, byte[] signature)
 {
-    using var x509 = new X509Certificate2(certificateData);
-    var ecdsa = x509.GetECDsaPublicKey();
+    var ecdsa = certificate.GetECDsaPublicKey();
     return ecdsa.VerifyHash(hash, signature);
+}
+
+static X509Certificate2 GetRoot(string name)
+{
+    var assembly = Assembly.GetCallingAssembly();
+    using var stream = assembly.GetManifestResourceStream($"VdsNcVerify.{name}.cer");
+    var data = new byte[stream.Length];
+    var read = 0;
+    while (read < data.Length)
+    {
+        read += stream.Read(data, read, (int)Math.Min(int.MaxValue, stream.Length - read));
+    }
+    return new X509Certificate2(data);
 }
 
 var root = await ReadJsonInput();
@@ -50,14 +63,24 @@ var root = await ReadJsonInput();
 var sig = root["sig"];
 var algorithm = sig["alg"].ToObject<string>();
 var certificateData = GetData(sig, "cer");
+using var x509 = new X509Certificate2(certificateData);
+using var ca = GetRoot("csca_au_rs4096");
+
+Console.WriteLine("Certificate issued to " + x509.Subject);
+
+var chain = new X509Chain();
+chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+chain.ChainPolicy.VerificationFlags = X509VerificationFlags.AllowUnknownCertificateAuthority;
+chain.ChainPolicy.ExtraStore.Add(ca);
+var signed = chain.Build(x509) && chain.ChainElements[^1].Certificate.Equals(ca);
+Console.WriteLine("Certificate signed by DFAT CSCA: " + signed);
+
 var signature = GetData(sig, "sigvl");
 
 var messageText = root["data"].ToString(Formatting.None);
 var canonicalMessage = Canonicalizer.Canonicalize(messageText);
 
 var hash = ComputeHash(canonicalMessage); 
-var result = ValidateHash(certificateData, hash, signature);
-
-// TODO: Validate certificate against root CSCA certificate
+var result = ValidateHash(x509, hash, signature);
 
 Console.WriteLine("Result: " + (result ? "SUCCESS" : "FAIL"));
